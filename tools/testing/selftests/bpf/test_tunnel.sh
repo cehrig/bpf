@@ -212,6 +212,24 @@ add_ipip_tunnel()
 	ip addr add dev $DEV 10.1.1.200/24
 }
 
+add_ipip_encap_tunnel()
+{
+	# at_ns0 namespace
+  ip netns exec at_ns0 ip fou add port 5555 $IPPROTO
+  ip netns exec at_ns0 \
+  	ip link add dev $DEV_NS type $TYPE \
+  	local 172.16.1.100 remote 172.16.1.200 \
+  	encap $ENCAP encap-sport auto encap-dport 5555 noencap-csum
+  ip netns exec at_ns0 ip link set dev $DEV_NS up
+  ip netns exec at_ns0 ip addr add dev $DEV_NS 10.1.1.100/24
+
+  # root namespace
+  ip fou add port 5555 $IPPROTO
+  ip link add dev $DEV type $TYPE external
+  ip link set dev $DEV up
+  ip addr add dev $DEV 10.1.1.200/24
+}
+
 add_ip6tnl_tunnel()
 {
 	ip netns exec at_ns0 ip addr add ::11/96 dev veth0
@@ -461,6 +479,60 @@ test_ipip()
         echo -e ${GREEN}"PASS: $TYPE"${NC}
 }
 
+test_ipip_gue()
+{
+	TYPE=ipip
+	DEV_NS=ipip00
+	DEV=ipip11
+	ret=0
+	ENCAP=gue
+	IPPROTO=$ENCAP
+
+	check $TYPE
+	config_device
+	add_ipip_encap_tunnel
+	ip link set dev veth1 mtu 1500
+	attach_bpf $DEV ipip_gue_set_tunnel ipip_encap_get_tunnel
+	ping $PING_ARG 10.1.1.100
+	check_err $?
+	ip netns exec at_ns0 ping $PING_ARG 10.1.1.200
+	check_err $?
+	cleanup
+
+	if [ $ret -ne 0 ]; then
+                echo -e ${RED}"FAIL: $TYPE (GUE)"${NC}
+                return 1
+        fi
+        echo -e ${GREEN}"PASS: $TYPE (GUE)"${NC}
+}
+
+test_ipip_fou()
+{
+	TYPE=ipip
+	DEV_NS=ipip00
+	DEV=ipip11
+	ret=0
+	ENCAP=fou
+	IPPROTO="ipproto 4"
+
+	check $TYPE
+	config_device
+	add_ipip_encap_tunnel
+	ip link set dev veth1 mtu 1500
+	attach_bpf $DEV ipip_fou_set_tunnel ipip_encap_get_tunnel
+	ping $PING_ARG 10.1.1.100
+	check_err $?
+	ip netns exec at_ns0 ping $PING_ARG 10.1.1.200
+	check_err $?
+	cleanup
+
+	if [ $ret -ne 0 ]; then
+                echo -e ${RED}"FAIL: $TYPE (FOU)"${NC}
+                return 1
+        fi
+        echo -e ${GREEN}"PASS: $TYPE (FOU)"${NC}
+}
+
 test_ipip6()
 {
 	TYPE=ip6tnl
@@ -634,6 +706,7 @@ cleanup()
 	ip xfrm policy delete dir in src 10.1.1.100/32 dst 10.1.1.200/32 2> /dev/null
 	ip xfrm state delete src 172.16.1.100 dst 172.16.1.200 proto esp spi 0x1 2> /dev/null
 	ip xfrm state delete src 172.16.1.200 dst 172.16.1.100 proto esp spi 0x2 2> /dev/null
+	ip fou del port 5555 gue 2> /dev/null
 }
 
 cleanup_exit()
@@ -707,6 +780,14 @@ bpf_tunnel_test()
 	echo "Testing IPIP tunnel..."
 	test_ipip
 	errors=$(( $errors + $? ))
+
+	echo "Testing IPIP (GUE) tunnel..."
+  test_ipip_gue
+  errors=$(( $errors + $? ))
+
+	echo "Testing IPIP (FOU) tunnel..."
+  test_ipip_fou
+  errors=$(( $errors + $? ))
 
 	echo "Testing IPIP6 tunnel..."
 	test_ipip6
